@@ -5,39 +5,20 @@ import subprocess
 from subprocess import PIPE, Popen
 from pathlib import Path
 from fastapi import FastAPI
+import uvicorn
 
 app = FastAPI()
-
-# Local credentials
-hostname = "localhost"
-db = "postgres"
-port = 5432
-username = "postgres"
-password = "Volley&drums2"
-
-@app.get("/elevation_api")
-async def query(lat: float, long: float):
-    coord = (lat, long)
-    file = open("fl_files.pkl", "rb")
-    files = pickle.load(file)
-    projs = find_project(coord)
-    for proj in projs:
-        file_list = order_files(coord, proj[0], files)
-        for file in file_list:
-            elevation = query_elevation(coord, file[0])
-            if elevation > 0:
-                return {"File": file[0], "Elevation: ": elevation}
 
 # All of the helper functions to query the elevation of a
 # given coordinate (if exists in database)
 # Follows the following steps:
 #     
-#     1. Function to locate which specific project contains the coordinate on a database level --> Project name
-#     2. Function to locate which specific TIF file contains the coordinate on a project level --> TIF file
-#     3. Check if the TIF file already exists inside our database. If exist, jump to step 6
-#     4. Function to return the presigned URL of the TIF file through aws cli --> presigned URL
-#     5. Function to load the specified TIF file into our database
-#     6. Script to interact with postgresql and query the elevation --> elevation
+    # 1. Function to locate which specific project contains the coordinate on a database level --> Project name
+    # 2. Function to locate which specific TIF file contains the coordinate on a project level --> TIF file
+    # 3. Check if the TIF file already exists inside our database. If exist, jump to step 6
+    # 4. Function to return the presigned URL of the TIF file through aws cli --> presigned URL
+    # 5. Function to load the specified TIF file into our database
+    # 6. Script to interact with postgresql and query the elevation --> elevation
 #     
 
 def find_project(coord: tuple) -> str:
@@ -210,6 +191,64 @@ def upload_outdb_raster(presigned_url: str, table_name: str, hostname: str, db: 
             cursor.close()
             connection.close()
 
+def upload_from_USGS(tablename: str, project_name: str, hostname: str, db: str, username: str, port: int, password: str):
+    """
+    Takes in a presigned url of a raster file as well as credentials to a postgreSQL database
+    Creates a .sql file containing the commands to upload the raster file as a table into the database
+    Deletes the .sql file
+    """
+    # Preparing raster for upload
+    print("Table name: ", tablename)
+    out_file = "out.sql"
+    raster_cmd = ("""raster2pgsql -F -I -C -s 26916 -t auto -R """\
+               + """/vsicurl/http://prd-tnm.s3.amazonaws.com/StagedProducts/Elevation/1m/Projects/{}/TIFF/{}.tif {} > {}""")\
+               .format(project_name, tablename, tablename, out_file)
+    
+    # Running command to produce the .sql file
+    proc = subprocess.Popen(raster_cmd, shell=True, stdin=PIPE, stdout=PIPE, stderr=PIPE)
+    out = b'output init'
+    err = b'error init'
+    
+    try:
+        print("Making .sql file...")
+        out, err = proc.communicate(timeout=300)
+    except:
+        print("Timed out. Aborting upload.")
+        return
+    print("out: {}, err: {}".format(out.decode('utf-8'), err.decode('utf-8')))
+    
+    if not Path(out_file).is_file():
+        with open("out.sql", "w") as f:
+            f.write(out.decode('utf-8'))
+            f.close()
+    
+    # Connecting to database and uploading file
+    try:
+        # Connecting to the database
+        print("Connecting to {} database".format(db))
+        connection = psycopg2.connect(user=username, password=password, host=hostname, port=str(port), database=db)
+        
+        # Executing the .sql file
+        with connection.cursor() as cursor:
+            print("Uploading raster...")
+            cursor.execute(open(out_file, "r").read())
+            print("Uploaded successfully!")
+        
+    except (Exception, psycopg2.Error) as error:
+        print("Error: ", error)
+        print("Aborting upload.")
+        return
+    
+    finally:
+        # Deleting the .sql file
+        proc_del = subprocess.Popen("del {}".format(out_file), shell=True, stdin=PIPE, stdout=PIPE, stderr=PIPE)
+        print("Deleted the temporary .sql file")
+        
+        # Closing database connection.
+        if connection:
+            cursor.close()
+            connection.close()
+
 def make_raw(string: str):
     return string.replace('&', '^&').replace('=', '^=')
 
@@ -244,7 +283,7 @@ def send_elevation_query(query: str, hostname: str, db: str, username: str, port
             cursor.close()
             connection.close()
 
-def query_elevation(coordinates: tuple, file: str) -> float:
+def query_elevation(coordinates: tuple, file: str, proj) -> float:
     """
     Query the elevation of a given coordinate and a given TIF file
     If no elevation data is found for the coord, return -1
@@ -260,7 +299,7 @@ def query_elevation(coordinates: tuple, file: str) -> float:
 
         # STEP 5
         # Uploading outdb file to postgres DB inside schema = "rasters"
-        upload_outdb_raster(presigned, table_name, hostname, db, username, port, password)
+        upload_from_USGS(table_name, proj, hostname, db, username, port, password)
     print("{} is in {} database".format(file, db))
     
     # STEP 6
@@ -277,3 +316,27 @@ def query_elevation(coordinates: tuple, file: str) -> float:
     elif elevation == -2:
         print("Error occured when querying the database")
     return elevation
+
+# Local credentials
+hostname = "localhost"
+db = "postgres"
+port = 5432
+username = "postgres"
+password = "Volley&drums2"
+
+@app.get("/")
+def query(lat: float, long: float):
+    coord = (lat, long)
+    file = open(r"C:\Users\andrew.tan\Desktop\Elevation_API\fl_files.pkl", "rb")
+    files = pickle.load(file)
+    projs = find_project(coord)
+    for proj in projs:
+        file_list = order_files(coord, proj[0], files)
+        for file in file_list:
+            elevation = query_elevation(coord, file[0], proj)
+            if elevation > 0:
+                return {"File": file[0], "Elevation: ": elevation}
+
+if __name__ == "__main__":
+#    print(query(-83.938675, 30.11062777777778))
+   uvicorn.run("elevation_api:app", host="127.0.0.1", port=8000, reload=True)
