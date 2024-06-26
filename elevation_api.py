@@ -322,7 +322,7 @@ hostname = "localhost"
 db = "postgres"
 port = 5432
 username = "postgres"
-password = "Volley&drums2"
+password = "********"
 
 @app.get("/")
 def query(lat: float, long: float):
